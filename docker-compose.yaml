@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  detection-api:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    image: detection-api:latest
+    container_name: detection-api
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/detection-api.py:/app/detection-api.py
+  streamlit-web:
+    build:
+      context: .
+      dockerfile: ./frontend/Dockerfile
+    image: detection-service:latest
+    container_name: detection-service
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./frontend/streamlit_app.py:/app/streamlit_app.py
