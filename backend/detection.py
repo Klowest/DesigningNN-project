@@ -1,25 +1,34 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from dotenv import load_dotenv
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import StreamingResponse
 import uvicorn
+import os
+import uuid
+from io import BytesIO
 
-load_dotenv()
-app = FastAPI()
-
-class TextRequest(BaseModel):
-    text: str
+app = FastAPI(title="Detection API", version="1.0")
 
 @app.get("/health")
 def health():
     return {"status": "OK"}
 
-@app.post("/test")
-def test(request: TextRequest): 
-    processed_text = f"Обработано: {request.text}"
+@app.post("/process")
+async def process_file(file: UploadFile = File(...)):
+    try:
+        # Читаем содержимое
+        contents = await file.read()
+        name, ext = os.path.splitext(file.filename)
+        new_name = f"processed_{name}_{str(uuid.uuid4())[:8]}{ext}"
 
-    print(processed_text)
-    
-    return {"text": processed_text}
+        # В будущем: здесь будет обработка нейросетью
+        # Сейчас просто возвращаем тот же файл
 
-if __name__ == '__main__':
+        return StreamingResponse(
+            BytesIO(contents),
+            media_type=file.content_type,
+            headers={"Content-Disposition": f'attachment; filename="{new_name}"'}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+
+if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=5000)

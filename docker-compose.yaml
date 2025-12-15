@@ -9,8 +9,7 @@ services:
     container_name: detection-api
     ports:
       - "5000:5000"
-    volumes:
-      - ./backend/detection-api.py:/app/detection-api.py
+
   streamlit-web:
     build:
       context: .
@@ -19,5 +18,3 @@ services:
     container_name: detection-service
     ports:
       - "8501:8501"
-    volumes:
-      - ./frontend/streamlit_app.py:/app/streamlit_app.py
