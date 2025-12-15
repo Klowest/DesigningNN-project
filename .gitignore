@@ -2,4 +2,4 @@
 /dataset
 /yolo_football_dataset
 /runs
-*.pt
+# *.pt
