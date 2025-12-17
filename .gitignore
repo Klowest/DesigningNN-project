@@ -1,5 +1,4 @@
-/coco_yolo
-/dataset
-/yolo_football_dataset
-/runs
-# *.pt
+model
+!model/runs/weights/*.pt
+!model/*.py
+!model/*.ipynb

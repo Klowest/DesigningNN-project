@@ -9,6 +9,8 @@ services:
     container_name: detection-api
     ports:
       - "5000:5000"
+    volumes:
+      - ./model:/app/model
 
   streamlit-web:
     build:
