@@ -6,7 +6,8 @@ import base64
 
 IP_API = "detection-api"
 PORT_API = "5000"
-API_URL = f"http://{IP_API}:{PORT_API}/process"
+# API_URL = f"http://{IP_API}:{PORT_API}/process"\
+API_URL = "http://127.0.0.1:5000/process"
 
 # Путь к фоновому изображению
 BACKGROUND_PATH = "./assets/background.jpg"

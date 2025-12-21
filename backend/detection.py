@@ -11,51 +11,63 @@ from typing import List, Dict, Any, Optional
 import cv2
 import numpy as np
 import torch
-from torchvision.models.detection import fasterrcnn_resnet50_fpn
-from torchvision.transforms import functional as F
-from torchvision.models import ResNet50_Weights
+import time
+# from torchvision.models.detection import fasterrcnn_resnet50_fpn
+# from torchvision.transforms import functional as F
+from torchvision import transforms
+from torchvision.ops import nms, box_convert
+# from torchvision.models import ResNet50_Weights
+from model.yolo_model import create_yolo_model
 
 # КОНФИГУРАЦИЯ МОДЕЛИ
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL_PATH = "/app/model/runs/weights/fasterrcnn_football_coco.pt"
+# MODEL_PATH = "/app/model/runs/weights/yolo_final_rep_v5.pt"
+MODEL_PATH = "model/runs/weights/yolo_final_rep_v5.pt"
+
 SCORE_THRESHOLD = 0.6
+conf_thres = 0.3
+iou_thres = 0.1
+max_dets = 200
 
 LABELS = {
-    1: "ball",
-    2: "coach",
-    3: "goalkeeper",
-    4: "player",
-    5: "referee",
+    0: "ball",
+    1: "coach",
+    2: "goalkeeper",
+    3: "player",
+    4: "referee",
 }
 
 COLORS = {
-    1: (0, 0, 255),
-    2: (0, 255, 0),
-    3: (255, 0, 0),
-    4: (0, 255, 255),
-    5: (255, 0, 255),
+    0: (0, 0, 255),
+    1: (0, 255, 0),
+    2: (255, 0, 0),
+    3: (0, 255, 255),
+    4: (255, 0, 255),
 }
 
 # Параметры обработки видео
-FRAME_SKIP = 5       # Обрабатывать каждый 5-й кадр (пока так, чтобы долго не было)
+FRAME_SKIP = 1       # Обрабатывать каждый 5-й кадр (пока так, чтобы долго не было)
 CACHE_FRAMES = True  # Использовать последние боксы для промежуточных кадров (чтобы скачков не было)
-
+IMGSZ = 640
 # -----------------------------------
 # Загрузка весов модели из MODEL_PATH
 # ------------------------------------
 def load_model():
-    model = fasterrcnn_resnet50_fpn(
-        weights=None,
-        weights_backbone=None,
-        num_classes=len(LABELS) + 1 
-    )
+    # model = fasterrcnn_resnet50_fpn(
+    #     weights=None,
+    #     weights_backbone=None,
+    #     num_classes=len(LABELS) + 1 
+    # )
 
-    state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-    model.load_state_dict(state_dict)
+    # state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+    # model.load_state_dict(state_dict)
 
-    model.to(DEVICE)
-    model.eval()
-    print("Model loaded")
+    # model.to(DEVICE)
+    # model.eval()
+    # print("Model loaded")
+    model = create_yolo_model().to(DEVICE).eval()
+    model.apply(lambda m: hasattr(m, 'reparameterize') and m.reparameterize())
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
 
     return model
 
@@ -83,27 +95,74 @@ def mock_detect(image: np.ndarray) -> List[Dict[str, Any]]:
         })
     return boxes
 
+
+def getPredict(pred, imgsz, orig_w, orig_h):
+    box_cxcywh = pred[:, :4]          # [N, 4]
+    obj_logit = pred[:, 4]            # [N]
+    cls_logits = pred[:, 5:]          # [N, C]
+
+    obj_conf = obj_logit.sigmoid()
+    cls_conf = cls_logits.sigmoid()
+    class_conf, class_id = cls_conf.max(dim=1)
+    conf = obj_conf * class_conf
+
+    keep = conf > conf_thres
+    if keep.sum() == 0:
+        return [], [], []
+
+    box_cxcywh = box_cxcywh[keep]
+    conf = conf[keep]
+    class_id = class_id[keep]
+    box_xyxy = box_convert(box_cxcywh, in_fmt='cxcywh', out_fmt='xyxy')
+
+    keep_nms = []
+    for cls in torch.unique(class_id):
+        cls_mask = class_id == cls
+        cls_boxes = box_xyxy[cls_mask]
+        cls_conf = conf[cls_mask]
+        cls_keep = nms(cls_boxes, cls_conf, iou_threshold=iou_thres)
+        keep_nms.append(torch.where(cls_mask)[0][cls_keep])
+    if keep_nms:
+        keep_nms = torch.cat(keep_nms)
+        keep_nms = keep_nms[conf[keep_nms].argsort(descending=True)[:max_dets]]  # top-k by confidence
+    else:
+        keep_nms = torch.tensor([], dtype=torch.long)
+    
+    if len(keep_nms) == 0:
+        return [], [], []
+
+    box_xyxy = box_xyxy[keep_nms]
+    conf = conf[keep_nms]
+    class_id = class_id[keep_nms]
+
+    box_xyxy[:, [0, 2]] *= orig_w / imgsz
+    box_xyxy[:, [1, 3]] *= orig_h / imgsz
+    box_xyxy = box_xyxy.round().int()
+
+    return box_xyxy, class_id, conf
+
 # -------------------------------------
-# РЕАЛЬНЫЙ ДЕТЕКТ: модель из resnet50
+# РЕАЛЬНЫЙ ДЕТЕКТ
 # ------------------------------------
-def detect_with_model(image: np.ndarray) -> List[Dict[str, Any]]:
+def detect_with_model(image, width, height) -> List[Dict[str, Any]]:
     """
     image: np.ndarray (H, W, 3), RGB
     """
-    img_tensor = F.to_tensor(image).to(DEVICE)
-
+    # img_tensor = F.to_tensor(image).to(DEVICE)
     with torch.no_grad():
-        outputs = MODEL([img_tensor])[0]
+        outputs = MODEL(image)[0]
 
-    boxes = outputs["boxes"].cpu().numpy()
-    scores = outputs["scores"].cpu().numpy()
-    labels = outputs["labels"].cpu().numpy()
+    pred_data = getPredict(outputs, IMGSZ, width, height)
+
+    boxes = pred_data[0].cpu().numpy()
+    labels = pred_data[1].cpu().numpy()
+    scores = pred_data[2].cpu().numpy()
 
     detections = []
 
     for box, score, label in zip(boxes, scores, labels):
-        if score < SCORE_THRESHOLD:
-            continue
+        # if score < SCORE_THRESHOLD:
+        #     continue
 
         x1, y1, x2, y2 = box.astype(int)
 
@@ -170,6 +229,7 @@ def process_video(video_bytes: bytes, ext: str) -> bytes:
     frame_idx = 0
     last_detections: List[Dict[str, Any]] = []
 
+    start_time = time.time()
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -177,14 +237,22 @@ def process_video(video_bytes: bytes, ext: str) -> bytes:
 
         # Обрабатываем каждый FRAME_SKIP кадр  
         if frame_idx % FRAME_SKIP == 0:
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)        # → RGB
+            pil_image = Image.fromarray(rgb_frame)
+            transform = transforms.Compose([
+                transforms.Resize((IMGSZ, IMGSZ)),
+                transforms.ToTensor(),
+            ])
+            x = transform(pil_image).unsqueeze(0).to(DEVICE)
             
             # detections = mock_detect(frame) # когда использовалась заглушка
-            detections = detect_with_model(rgb_frame)
+            detections = detect_with_model(x, width, height)
             
             if CACHE_FRAMES or len(detections) > 0:
                 last_detections = detections
-            print(f"Кадр {frame_idx}: найдено {len(detections)} объектов")
+            # print(f"Кадр {frame_idx}: найдено {len(detections)} объектов")
+            print(f"Frame {frame_idx}: {len(detections)} detections")
         else:
             # Используем последние боксы (если они есть)
             detections = last_detections if CACHE_FRAMES else []
@@ -193,7 +261,10 @@ def process_video(video_bytes: bytes, ext: str) -> bytes:
         annotated_frame = draw_detections(frame.copy(), detections)
         out.write(annotated_frame)
         frame_idx += 1
-
+        
+    time_proc = time.time() - start_time
+    print("Время обработки", time_proc)
+    print("Кадров в секунду", frame_idx / time_proc)
     cap.release()
     out.release()
 
@@ -232,14 +303,30 @@ async def process_file(file: UploadFile = File(...)):
         if ext in [".jpg", ".jpeg", ".png"]:
             # ИЗОБРАЖЕНИЕ
 
-            image = Image.open(BytesIO(contents)).convert("RGB")
-            np_img = np.array(image)
+            # image = Image.open(BytesIO(contents)).convert("RGB")
+
+            # rgb_frame = cv2.cvtColor(contents, cv2.COLOR_BGR2RGB)        # → RGB
+            pil_image = Image.open(BytesIO(contents)).convert("RGB")
+            width, height = pil_image.size
+            transform = transforms.Compose([
+                transforms.Resize((IMGSZ, IMGSZ)),
+                transforms.ToTensor(),
+            ])
+            x = transform(pil_image).unsqueeze(0).to(DEVICE)
 
             # detections = mock_detect(np_img)     # когда использовалась заглушка
-            detections = detect_with_model(np_img)
+            detections = detect_with_model(x, width, height)
+
+            # output = BytesIO()
+            # media_type = "image/jpeg" if ext in [".jpg", ".jpeg"] else "image/png"
+            # return StreamingResponse(
+            #     output,
+            #     media_type=media_type,
+            #     headers={"Content-Disposition": f'attachment; filename="{new_name}"'}
+            # )
 
             # Отрисовка через PIL
-            draw = ImageDraw.Draw(image)
+            draw = ImageDraw.Draw(pil_image)
             try:
                 font = ImageFont.truetype("DejaVuSans.ttf", 14)
             except OSError:
@@ -262,7 +349,7 @@ async def process_file(file: UploadFile = File(...)):
                 draw.text((x1 + 2, y1 - text_h - 2), label, fill=(0, 0, 0), font=font)
 
             output = BytesIO()
-            image.save(output, format="JPEG" if ext in [".jpg", ".jpeg"] else "PNG")
+            pil_image.save(output, format="JPEG" if ext in [".jpg", ".jpeg"] else "PNG")
             output.seek(0)
             new_name = f"detected_{name}_{str(uuid.uuid4())[:8]}{ext}"
             media_type = "image/jpeg" if ext in [".jpg", ".jpeg"] else "image/png"

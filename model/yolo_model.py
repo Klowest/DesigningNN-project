@@ -1,18 +1,20 @@
 import torch.nn as nn
 import torch
-from efficientrep import EfficientRep
-from head import DetectHead
-from pafpn import EnhancedPAFPN
+from model.efficientrep import EfficientRep
+from model.head import DetectHead
+from model.pafpn import EnhancedPAFPN
 
 class YOLOEfficient(nn.Module):
     def __init__(self, nc=5, imgsz=640):
         super().__init__()
-        self.nc = nc
+        self.nc_external = nc       # сколько передано
+        self.nc_internal = nc + 1   # с objects
         self.backbone = EfficientRep(channels=[64, 128, 256, 512], act=True)
         self.neck = EnhancedPAFPN(channels=[64, 128, 256, 512])
         self.head = DetectHead(
+            imgsz=imgsz,
             in_channels=[64, 128, 256, 512],
-            nc=nc,
+            nc=self.nc_internal,
             stride=[4, 8, 16, 32]
         )
 
