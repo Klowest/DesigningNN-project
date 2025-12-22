@@ -10,7 +10,7 @@ PORT_API = "5000"
 API_URL = "http://127.0.0.1:5000/process"
 
 # Путь к фоновому изображению
-BACKGROUND_PATH = "./assets/background.jpg"
+BACKGROUND_PATH = "frontend/assets/background.jpg"
 
 def get_base64_of_bin_file(bin_file):
     with open(bin_file, 'rb') as f:

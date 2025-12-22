@@ -22,7 +22,7 @@ from model.yolo_model import create_yolo_model
 # КОНФИГУРАЦИЯ МОДЕЛИ
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # MODEL_PATH = "/app/model/runs/weights/yolo_final_rep_v5.pt"
-MODEL_PATH = "model/runs/weights/yolo_final_rep_v5.pt"
+MODEL_PATH = "model/runs/weights/yolo_final_rep_v6.pt"
 
 SCORE_THRESHOLD = 0.6
 conf_thres = 0.3
@@ -150,7 +150,11 @@ def detect_with_model(image, width, height) -> List[Dict[str, Any]]:
     """
     # img_tensor = F.to_tensor(image).to(DEVICE)
     with torch.no_grad():
-        outputs = MODEL(image)[0]
+        if (DEVICE == "cpu"):
+            outputs = MODEL(image)[0]
+        else:
+            with torch.amp.autocast(DEVICE):
+                outputs = MODEL(image)[0]
 
     pred_data = getPredict(outputs, IMGSZ, width, height)
 

@@ -2,8 +2,69 @@ import torch
 import torch.nn.functional as F
 from torchvision.ops import box_convert, complete_box_iou, box_iou
 
+def varifocal_loss(pred, target, alpha=0.75, gamma=2.0, reduction='sum'):
+    """
+    Уменьшение влияния от фона (при alpha > 0.5), уменьшение влияния от уверенных объектов
+    pred: [N] — logits
+    target: [N] — quality (IoU), ∈ [0,1]
+    """
+    pred_sigmoid = torch.sigmoid(pred)
+    focal_weight = (target * alpha + (1 - target) * (1 - alpha))
+    weight = focal_weight * (target - pred_sigmoid).abs().pow(gamma)
+    loss = F.binary_cross_entropy_with_logits(
+        pred, target, weight=weight.detach(), reduction='none'
+    )
+    return loss.sum() if reduction == 'sum' else loss.mean()
 
-def detection_loss(pred, targets, pos_weight, num_classes, imgsz, device, topk=10, weight_box=5.0, weight_obj=1.0, weight_cls=1.0):
+def focal_bce_with_logits(
+    logits, 
+    targets, 
+    pos_weight=None, 
+    alpha=None, 
+    gamma=2.0, 
+    reduction='mean'
+):
+    """
+    Уменьшение влияния уверенных классов + учёт дизбаланса классов через веса
+    
+    Args:
+        logits: [N, C]
+        targets: [N, C] (one-hot)
+        pos_weight: [C] — твои текущие веса (N_total / N_class)
+        alpha: если None — используем pos_weight; иначе [C] или скаляр
+        gamma: фокусирующий параметр (>=0)
+    """
+    # Сначала получаем probs через sigmoid
+    probs = torch.sigmoid(logits)
+    
+    # BCE loss без сокращения
+    if pos_weight is not None:
+        # Вес для позитивов: pos_weight, для негативов: 1.0
+        weight = torch.where(targets == 1, pos_weight, torch.tensor(1.0, device=logits.device))
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits, targets, weight=weight.detach(), reduction='none'
+        )
+    else:
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    
+    # p_t — вероятность правильного класса
+    p_t = probs * targets + (1 - probs) * (1 - targets)  # [N, C]
+
+    if isinstance(gamma, (int, float)):
+        focal_weight = (1 - p_t) ** gamma
+    else:
+        focal_weight = (1 - p_t) ** gamma.unsqueeze(0)  # [1, C] → broadcast
+    
+    focal_loss = focal_weight * bce_loss  # [N, C]
+    
+    if reduction == 'mean':
+        return focal_loss.mean()
+    elif reduction == 'sum':
+        return focal_loss.sum()
+    else:
+        return focal_loss
+
+def detection_loss(pred, targets, pos_weight, num_classes, imgsz, device, gamma_per_class=2, topk=10, weight_box=5.0, weight_obj=1.0, weight_cls=1.0):
     """
     Лосс по предиктным боксам.
     Для всех предиктов проходит loss BCE по тому, является ли он объектом.
@@ -17,6 +78,7 @@ def detection_loss(pred, targets, pos_weight, num_classes, imgsz, device, topk=1
         targets: List[Tensor[M_i, 5]] = [class_id (0..4), cx, cy, w, h]
         num_classes: количество классов без учёта objects
         imgsz: размер изображения (должно быть imgsz x imgsz)
+        gamma_per_class: [num_classes] или скалаяр, gamma для focal loss.
 
     Returns:
         total_loss, logs
@@ -72,9 +134,10 @@ def detection_loss(pred, targets, pos_weight, num_classes, imgsz, device, topk=1
         # obj_target = assigned_mask.float()  # [N]
         obj_target = torch.zeros(N, device=device)
         obj_target[pos_idx] = max_iou[pos_idx].clamp(0.0, 1.0)
-        loss_obj += F.binary_cross_entropy_with_logits(
-            obj_pred[b], obj_target, reduction='sum'
-        )
+        # loss_obj += F.binary_cross_entropy_with_logits(
+        #     obj_pred[b], obj_target, reduction='sum'
+        # )
+        loss_obj += varifocal_loss(obj_pred[b], obj_target, alpha=0.75, gamma=2.0)
 
         if len(pos_idx) > 0:
             # это ближайшие по IoU таргеты, соответствующие живым боксам
@@ -88,12 +151,29 @@ def detection_loss(pred, targets, pos_weight, num_classes, imgsz, device, topk=1
             # loss боксов Можно оптимизировать и считать только между элементами
             loss_box += (1 - complete_box_iou(pred_boxes_pos, tgt_boxes_pos).diag()).sum()
 
-            # loss классов
+            # BCE loss для классов
+            # cls_target = torch.zeros(len(pos_idx), num_classes, device=device)
+            # cls_target[torch.arange(len(pos_idx)), tgt_classes] = 1.0
+            # loss_cls += F.binary_cross_entropy_with_logits(
+            #     cls_pred[b][pos_idx], cls_target, reduction='sum', pos_weight=pos_weight
+            # )
+
+            # Focal Loss для классов
+            cls_pred_pos = cls_pred[b][pos_idx]  # [P, NC]
             cls_target = torch.zeros(len(pos_idx), num_classes, device=device)
-            cls_target[torch.arange(len(pos_idx)), tgt_classes] = 1.0
-            loss_cls += F.binary_cross_entropy_with_logits(
-                cls_pred[b][pos_idx], cls_target, reduction='sum', pos_weight=pos_weight
+            cls_target[torch.arange(len(pos_idx)), tgt_classes] = 1.0  # [P, NC]
+
+            # разные гаммы для классов, учёт дизбаланса
+
+            loss_cls += focal_bce_with_logits(
+                cls_pred_pos, 
+                cls_target, 
+                pos_weight=pos_weight,
+                alpha=None,                   # используем pos_weight как alpha
+                gamma=gamma_per_class,        # значение или [C]
+                reduction='sum'
             )
+
             total_pos += len(pos_idx)
 
     # Нормировка
