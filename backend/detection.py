@@ -22,10 +22,11 @@ from model.yolo_model import create_yolo_model
 # КОНФИГУРАЦИЯ МОДЕЛИ
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # MODEL_PATH = "/app/model/runs/weights/yolo_final_rep_v5.pt"
-MODEL_PATH = "model/runs/weights/yolo_final_rep_v6.pt"
+MODEL_PATH = "model/runs/weights/yolo_final_rep_v7.pt"
 
 SCORE_THRESHOLD = 0.6
-conf_thres = 0.3
+CLASS_CONF_THRES = [0.35, 0.4, 0.4, 0.4, 0.4] 
+# conf_thres = 0.4
 iou_thres = 0.1
 max_dets = 200
 
@@ -96,7 +97,7 @@ def mock_detect(image: np.ndarray) -> List[Dict[str, Any]]:
     return boxes
 
 
-def getPredict(pred, imgsz, orig_w, orig_h):
+def getPredict(pred, imgsz, orig_w, orig_h, class_conf_thres):
     box_cxcywh = pred[:, :4]          # [N, 4]
     obj_logit = pred[:, 4]            # [N]
     cls_logits = pred[:, 5:]          # [N, C]
@@ -106,7 +107,18 @@ def getPredict(pred, imgsz, orig_w, orig_h):
     class_conf, class_id = cls_conf.max(dim=1)
     conf = obj_conf * class_conf
 
-    keep = conf > conf_thres
+    if isinstance(class_conf_thres, (list, tuple)):
+        class_conf_thres = torch.tensor(class_conf_thres, device=conf.device)
+    # поддержка dict: {cls_id: thres}
+    elif isinstance(class_conf_thres, dict):
+        class_conf_thres = torch.tensor(
+            [class_conf_thres.get(i, 0.0) for i in range(cls_logits.shape[1])],
+            device=conf.device
+        )
+    # Берём порог для каждого предсказанного класса
+    per_class_thres = class_conf_thres[class_id]  # [N]
+    keep = conf > per_class_thres  # ✅ векторизованное сравнение
+
     if keep.sum() == 0:
         return [], [], []
 
@@ -156,11 +168,10 @@ def detect_with_model(image, width, height) -> List[Dict[str, Any]]:
             with torch.amp.autocast(DEVICE):
                 outputs = MODEL(image)[0]
 
-    pred_data = getPredict(outputs, IMGSZ, width, height)
-
-    boxes = pred_data[0].cpu().numpy()
-    labels = pred_data[1].cpu().numpy()
-    scores = pred_data[2].cpu().numpy()
+    pred_data = getPredict(outputs, IMGSZ, width, height, CLASS_CONF_THRES)
+    boxes = pred_data[0]
+    labels = pred_data[1]
+    scores = pred_data[2]
 
     detections = []
 
@@ -168,12 +179,12 @@ def detect_with_model(image, width, height) -> List[Dict[str, Any]]:
         # if score < SCORE_THRESHOLD:
         #     continue
 
-        x1, y1, x2, y2 = box.astype(int)
+        x1, y1, x2, y2 = box
 
         detections.append({
             "class_id": int(label),
             "confidence": float(score),
-            "bbox": [x1, y1, x2, y2],
+            "bbox": [int(x1), int(y1), int(x2), int(y2)],
         })
 
     return detections
