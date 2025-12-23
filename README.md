@@ -1,4 +1,4 @@
-# DesigningNN-project — Microservices Edition
+# DesigningNN-project
 
 ## Проект выполнили:
 
