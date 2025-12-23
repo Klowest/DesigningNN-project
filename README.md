@@ -7,7 +7,7 @@
 - Андрей Киселев
 - Пичугов Виктор
 
-![Демонстрация](detected_bars_real.gif)
+![Демонстрация](detected_Bars_Real.gif)
 
 ---
 
